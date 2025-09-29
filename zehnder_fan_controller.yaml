@@ -1,6 +1,9 @@
 esphome:
   name: esphome-zehnder-fan
   friendly_name: ESPHome Zehnder fan
+  project:
+    name: srslynow.${friendly_name}
+    version: v1
 
 esp32:
   board: esp32-c6-devkitc-1
@@ -13,16 +16,16 @@ logger:
 # Enable Home Assistant API
 api:
   encryption:
-    key: "redacted"
+    key: !secret api_encryption_key
 
 ota:
   - platform: esphome
-    password: "redacted"
+    password: !secret ota_password
 
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
-  domain: .fritz.box
+  domain: !secret wifi_domain
 
 # SPI configuration for nRF905
 spi:
@@ -44,9 +47,9 @@ external_components:
 fan:
   - platform: zehnder_fan
     id: ventilation_fan
-    name: "Mechanical Ventilation"
+    name: Mechanical Ventilation
     spi_id: spi_bus
-    
+
     # Required Pin Configuration
     cs_pin: GPIO18
     pwr_pin: GPIO15
@@ -56,10 +59,12 @@ fan:
 
 button:
   - platform: restart
-    name: "Restart Controller"
+    name: Restart Controller
+    disabled_by_default: true
+
   - platform: template
-    name: "Pair with Fan"
-    icon: "mdi:wifi"
+    name: Pair with Fan
+    icon: mdi:wifi
     entity_category: config
     on_press:
       - lambda: |-
