@@ -12,103 +12,213 @@ static const char *const NVS_NAMESPACE = "zehnder_fan";
 static const char *const NVS_PAIRING_KEY = "pairing_info";
 
 // =========================================================================
-// 1. NRF905Controller Implementation
+// 1. CC1101Controller Implementation
 // =========================================================================
 
-void NRF905Controller::setup_pins(GPIOPin *pwr_pin, GPIOPin *ce_pin, GPIOPin *txen_pin, GPIOPin *dr_pin) {
-    this->pwr_pin_ = pwr_pin;
-    this->ce_pin_ = ce_pin;
-    this->txen_pin_ = txen_pin;
-    this->dr_pin_ = dr_pin;
+// CC1101 868 MHz configuration for Zehnder protocol
+static const uint8_t cc1101_config_regs[] = {
+    0x0D,  // IOCFG2   - GDO2 output pin config
+    0x2E,  // IOCFG1   - GDO1 output pin config  
+    0x06,  // IOCFG0   - GDO0 output pin config (packet received)
+    0x47,  // FIFOTHR  - FIFO threshold
+    0xD3,  // SYNC1    - Sync word high byte
+    0x91,  // SYNC0    - Sync word low byte
+    0x10,  // PKTLEN   - Packet length (16 bytes for Zehnder)
+    0x04,  // PKTCTRL1 - Packet automation control
+    0x05,  // PKTCTRL0 - Packet automation control (fixed length)
+    0x00,  // ADDR     - Device address
+    0x00,  // CHANNR   - Channel number
+    0x06,  // FSCTRL1  - Frequency synthesizer control
+    0x00,  // FSCTRL0  - Frequency synthesizer control
+    0x21,  // FREQ2    - Frequency control word, high byte (868 MHz)
+    0x62,  // FREQ1    - Frequency control word, middle byte
+    0x76,  // FREQ0    - Frequency control word, low byte
+    0xF5,  // MDMCFG4  - Modem configuration (bandwidth)
+    0x83,  // MDMCFG3  - Modem configuration (data rate)
+    0x13,  // MDMCFG2  - Modem configuration (GFSK, 16/16 sync)
+    0x22,  // MDMCFG1  - Modem configuration
+    0xF8,  // MDMCFG0  - Modem configuration
+    0x15,  // DEVIATN  - Modem deviation setting
+    0x07,  // MCSM2    - Main Radio Control State Machine config
+    0x30,  // MCSM1    - Main Radio Control State Machine config
+    0x18,  // MCSM0    - Main Radio Control State Machine config
+    0x14,  // FOCCFG   - Frequency Offset Compensation config
+    0x6C,  // BSCFG    - Bit Synchronization config
+    0x07,  // AGCCTRL2 - AGC control
+    0x00,  // AGCCTRL1 - AGC control
+    0x92,  // AGCCTRL0 - AGC control
+    0x87,  // WOREVT1  - High byte Event0 timeout
+    0x6B,  // WOREVT0  - Low byte Event0 timeout
+    0xFB,  // WORCTRL  - Wake On Radio control
+    0x56,  // FREND1   - Front end RX configuration
+    0x10,  // FREND0   - Front end TX configuration
+    0xE9,  // FSCAL3   - Frequency synthesizer calibration
+    0x2A,  // FSCAL2   - Frequency synthesizer calibration
+    0x00,  // FSCAL1   - Frequency synthesizer calibration
+    0x1F,  // FSCAL0   - Frequency synthesizer calibration
+};
+
+void CC1101Controller::setup_pins(GPIOPin *gdo0_pin, GPIOPin *gdo2_pin) {
+    this->gdo0_pin_ = gdo0_pin;
+    this->gdo2_pin_ = gdo2_pin;
 }
 
-bool NRF905Controller::init() {
+bool CC1101Controller::init() {
     // Initialize SPI device
     this->spi_setup();
     
-    this->pwr_pin_->setup();
-    this->ce_pin_->setup();
-    this->txen_pin_->setup();
-    this->dr_pin_->setup();
+    this->gdo0_pin_->setup();
+    this->gdo0_pin_->pin_mode(gpio::FLAG_INPUT);
+    
+    if (this->gdo2_pin_ != nullptr) {
+        this->gdo2_pin_->setup();
+        this->gdo2_pin_->pin_mode(gpio::FLAG_INPUT);
+    }
 
-    this->set_mode_idle();
+    // Reset CC1101
+    this->reset();
+    delay(10);
 
-    // Zehnder nRF905 configuration profile from fan.h
-    const uint8_t zehnder_config[] = {0x76, 0x2E, 0x44, 0x10, 0x10, 0xA5, 0x5A, 0x5A, 0xA5, 0xDB};
-    this->write_config_registers(zehnder_config, sizeof(zehnder_config));
+    // Configure for 868 MHz Zehnder operation
+    this->configure_868mhz();
 
-    ESP_LOGD(TAG, "NRF905 initialized.");
+    ESP_LOGD(TAG, "CC1101 initialized for 868 MHz operation.");
     return true;
 }
 
-void NRF905Controller::set_mode_idle() {
-    this->pwr_pin_->digital_write(true);
-    this->ce_pin_->digital_write(false);
-    this->txen_pin_->digital_write(false);
-}
-
-void NRF905Controller::set_mode_receive() {
-    this->pwr_pin_->digital_write(true);
-    this->txen_pin_->digital_write(false);
-    this->ce_pin_->digital_write(true);
-}
-
-void NRF905Controller::set_mode_transmit() {
-    this->pwr_pin_->digital_write(true);
-    this->ce_pin_->digital_write(false); // Drop to standby before enabling TX
-    delayMicroseconds(100);
-    this->txen_pin_->digital_write(true);
-    this->ce_pin_->digital_write(true);
-}
-
-void NRF905Controller::set_tx_address(uint32_t address) {
+void CC1101Controller::reset() {
+    // Reset via CS pin toggle
+    this->disable();
+    delayMicroseconds(5);
     this->enable();
-    this->write_byte(0x22); // W_TX_ADDRESS
-    this->write_byte((address >> 0) & 0xFF);
-    this->write_byte((address >> 8) & 0xFF);
-    this->write_byte((address >> 16) & 0xFF);
-    this->write_byte((address >> 24) & 0xFF);
+    delayMicroseconds(10);
+    this->disable();
+    delayMicroseconds(41);
+    
+    // Send reset strobe
+    this->enable();
+    this->write_byte(CC1101_SRES);
+    this->disable();
+    delayMicroseconds(100);
+}
+
+void CC1101Controller::write_register(uint8_t reg, uint8_t value) {
+    this->enable();
+    this->write_byte(reg);
+    this->write_byte(value);
     this->disable();
 }
 
-void NRF905Controller::set_rx_address(uint32_t address) {
-    // RX address is set via config registers, not a direct command
-    const uint8_t config_update[] = {
-        0x76, 0x2E, 0x44, 0x10, 0x10, // Keep first 5 bytes
-        (uint8_t)((address >> 0) & 0xFF),
-        (uint8_t)((address >> 8) & 0xFF),
-        (uint8_t)((address >> 16) & 0xFF),
-        (uint8_t)((address >> 24) & 0xFF),
-        0xDB, // Keep last byte
-    };
-    this->write_config_registers(config_update, sizeof(config_update));
+uint8_t CC1101Controller::read_register(uint8_t reg) {
+    this->enable();
+    this->write_byte(reg | CC1101_READ_SINGLE);
+    uint8_t value = this->read_byte();
+    this->disable();
+    return value;
 }
 
-
-void NRF905Controller::write_tx_payload(const uint8_t *payload, size_t size) {
+void CC1101Controller::write_burst_register(uint8_t reg, const uint8_t *buffer, size_t len) {
     this->enable();
-    this->write_byte(0x20); // W_TX_PAYLOAD
+    this->write_byte(reg | CC1101_WRITE_BURST);
+    this->write_array(buffer, len);
+    this->disable();
+}
+
+void CC1101Controller::send_strobe(uint8_t strobe) {
+    this->enable();
+    this->write_byte(strobe);
+    this->disable();
+}
+
+void CC1101Controller::flush_rx() {
+    this->send_strobe(CC1101_SFRX);
+}
+
+void CC1101Controller::flush_tx() {
+    this->send_strobe(CC1101_SFTX);
+}
+
+void CC1101Controller::configure_868mhz() {
+    // Write all configuration registers in burst mode starting at IOCFG2 (0x00)
+    this->write_burst_register(CC1101_IOCFG2, cc1101_config_regs, sizeof(cc1101_config_regs));
+    
+    // Set packet length to 16 bytes (Zehnder frame size)
+    this->write_register(0x06, FAN_FRAMESIZE);
+}
+
+void CC1101Controller::set_mode_idle() {
+    this->send_strobe(CC1101_SIDLE);
+    delayMicroseconds(100);
+}
+
+void CC1101Controller::set_mode_receive() {
+    this->send_strobe(CC1101_SRX);
+    delayMicroseconds(100);
+}
+
+void CC1101Controller::set_mode_transmit() {
+    this->send_strobe(CC1101_STX);
+    delayMicroseconds(100);
+}
+
+void CC1101Controller::set_address(uint32_t address) {
+    // CC1101 uses a single byte address for filtering (ADDR register at 0x09)
+    // The Zehnder protocol may use the full 32-bit address in the payload itself,
+    // but for hardware filtering we use the lowest byte
+    this->write_register(0x09, (address >> 0) & 0xFF);
+}
+
+void CC1101Controller::set_tx_address(uint32_t address) {
+    // For CC1101, TX and RX use the same address register
+    this->set_address(address);
+}
+
+void CC1101Controller::set_rx_address(uint32_t address) {
+    // For CC1101, TX and RX use the same address register
+    this->set_address(address);
+}
+
+void CC1101Controller::write_tx_payload(const uint8_t *payload, size_t size) {
+    // Go to idle first
+    this->set_mode_idle();
+    
+    // Flush TX FIFO
+    this->flush_tx();
+    
+    // Write payload to TX FIFO
+    this->enable();
+    this->write_byte(CC1101_TXFIFO | CC1101_WRITE_BURST);
     this->write_array(payload, size);
     this->disable();
 }
 
-bool NRF905Controller::read_rx_payload(uint8_t *buffer, size_t size) {
+bool CC1101Controller::read_rx_payload(uint8_t *buffer, size_t size) {
     if (!this->is_data_ready()) {
         return false;
     }
+    
+    // Read RXBYTES status register (status registers need special access)
     this->enable();
-    this->write_byte(0x24); // R_RX_PAYLOAD
+    this->write_byte(CC1101_RXBYTES | CC1101_READ_BURST);
+    uint8_t rxbytes = this->read_byte();
+    this->disable();
+    
+    uint8_t num_rxbytes = rxbytes & 0x7F;
+    
+    if (num_rxbytes < size) {
+        return false;
+    }
+    
+    // Read from RX FIFO
+    this->enable();
+    this->write_byte(CC1101_RXFIFO | CC1101_READ_BURST);
     this->read_array(buffer, size);
     this->disable();
+    
+    // Flush RX FIFO after reading
+    this->flush_rx();
+    
     return true;
-}
-
-void NRF905Controller::write_config_registers(const uint8_t *config, size_t size) {
-    this->set_mode_idle();
-    this->enable();
-    this->write_byte(0x00); // W_CONFIG
-    this->write_array(config, size);
-    this->disable();
 }
 
 
@@ -116,7 +226,7 @@ void NRF905Controller::write_config_registers(const uint8_t *config, size_t size
 // 2. ZehnderFanProtocol Implementation
 // =========================================================================
 
-ZehnderFanProtocol::ZehnderFanProtocol(NRF905Controller *radio) : radio_(radio) {
+ZehnderFanProtocol::ZehnderFanProtocol(CC1101Controller *radio) : radio_(radio) {
     // Initialize pending operation to idle state
     pending_op_.type = RadioOperationType::NONE;
     pending_op_.state = RadioOperationState::IDLE;
@@ -378,13 +488,13 @@ void ZehnderFanProtocol::handle_pairing_response() {
 void ZehnderFanComponent::setup() {
     ESP_LOGCONFIG(TAG, "Setting up Zehnder Fan...");
 
-    // Initialize nRF905 SPI device
-    this->nrf_radio_.set_spi_parent(this->spi_parent_);
-    this->nrf_radio_.set_cs_pin(this->cs_pin_);
-    this->nrf_radio_.setup_pins(this->pwr_pin_, this->ce_pin_, this->txen_pin_, this->dr_pin_);
-    this->nrf_radio_.init();
+    // Initialize CC1101 SPI device
+    this->cc1101_radio_.set_spi_parent(this->spi_parent_);
+    this->cc1101_radio_.set_cs_pin(this->cs_pin_);
+    this->cc1101_radio_.setup_pins(this->gdo0_pin_, this->gdo2_pin_);
+    this->cc1101_radio_.init();
 
-    this->fan_protocol_ = make_unique<ZehnderFanProtocol>(&this->nrf_radio_);
+    this->fan_protocol_ = make_unique<ZehnderFanProtocol>(&this->cc1101_radio_);
     
     // Initialize NVS
     esp_err_t err = nvs_flash_init();
@@ -417,10 +527,8 @@ void ZehnderFanComponent::update() {
 
 void ZehnderFanComponent::dump_config() {
     ESP_LOGCONFIG(TAG, "Zehnder Fan Component:");
-    LOG_PIN("  PWR Pin: ", this->pwr_pin_);
-    LOG_PIN("  CE Pin: ", this->ce_pin_);
-    LOG_PIN("  TXEN Pin: ", this->txen_pin_);
-    LOG_PIN("  DR Pin: ", this->dr_pin_);
+    LOG_PIN("  GDO0 Pin: ", this->gdo0_pin_);
+    LOG_PIN("  GDO2 Pin: ", this->gdo2_pin_);
     if (this->pairing_info_.has_value()) {
         ESP_LOGCONFIG(TAG, "  Paired Network ID: 0x%08X", this->pairing_info_->network_id);
         ESP_LOGCONFIG(TAG, "  Paired Fan ID: 0x%02X", this->pairing_info_->main_unit_id);
