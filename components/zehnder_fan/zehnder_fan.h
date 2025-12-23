@@ -11,12 +11,34 @@ namespace esphome {
 namespace zehnder_fan {
 
 // Constants extracted from the original fan.h and config.h
-static const uint32_t NRF905_XTAL_FREQUENCY = 16000000;
 static const uint8_t FAN_FRAMESIZE = 16;
 static const uint8_t FAN_TX_FRAMES = 4;
 static const uint8_t FAN_TX_RETRIES = 50;
 static const uint32_t FAN_REPLY_TIMEOUT_MS = 500;
 static const uint32_t NETWORK_LINK_ID = 0xA55A5AA5;
+
+// CC1101 Command Strobes
+static const uint8_t CC1101_SRES = 0x30;      // Reset chip
+static const uint8_t CC1101_SFSTXON = 0x31;   // Enable and calibrate frequency synthesizer
+static const uint8_t CC1101_SCAL = 0x33;      // Calibrate frequency synthesizer
+static const uint8_t CC1101_SRX = 0x34;       // Enable RX
+static const uint8_t CC1101_STX = 0x35;       // Enable TX
+static const uint8_t CC1101_SIDLE = 0x36;     // Exit RX/TX
+static const uint8_t CC1101_SFRX = 0x3A;      // Flush RX FIFO
+static const uint8_t CC1101_SFTX = 0x3B;      // Flush TX FIFO
+
+// CC1101 Register Access
+static const uint8_t CC1101_WRITE_BURST = 0x40;
+static const uint8_t CC1101_READ_SINGLE = 0x80;
+static const uint8_t CC1101_READ_BURST = 0xC0;
+
+// CC1101 FIFO Access
+static const uint8_t CC1101_TXFIFO = 0x3F;
+static const uint8_t CC1101_RXFIFO = 0x3F;
+
+// CC1101 Status Registers
+static const uint8_t CC1101_RXBYTES = 0x3B;
+static const uint8_t CC1101_MARCSTATE = 0x35;
 
 // Fan device types and commands
 enum {
@@ -51,16 +73,17 @@ struct FanPairingInfo {
 };
 
 // =========================================================================
-// 1. Low-Level nRF905 Radio Controller
+// 1. Low-Level CC1101 Radio Controller
 // =========================================================================
-class NRF905Controller : public spi::SPIDevice<spi::BIT_ORDER_MSB_FIRST,
-                                              spi::CLOCK_POLARITY_LOW,
-                                              spi::CLOCK_PHASE_LEADING,
-                                              spi::DATA_RATE_4MHZ> {
+class CC1101Controller : public spi::SPIDevice<spi::BIT_ORDER_MSB_FIRST,
+                                               spi::CLOCK_POLARITY_LOW,
+                                               spi::CLOCK_PHASE_LEADING,
+                                               spi::DATA_RATE_4MHZ> {
 public:
-    void setup_pins(GPIOPin *pwr_pin, GPIOPin *ce_pin, GPIOPin *txen_pin, GPIOPin *dr_pin);
+    void setup_pins(GPIOPin *gdo0_pin, GPIOPin *gdo2_pin);
     void set_cs_pin(GPIOPin *cs_pin) { this->cs_ = cs_pin; }
     bool init();
+    
     void set_mode_idle();
     void set_mode_receive();
     void set_mode_transmit();
@@ -71,15 +94,20 @@ public:
     void write_tx_payload(const uint8_t *payload, size_t size);
     bool read_rx_payload(uint8_t *buffer, size_t size);
 
-    bool is_data_ready() { return this->dr_pin_->digital_read(); }
+    bool is_data_ready() { return this->gdo0_pin_->digital_read(); }
 
 private:
-    void write_config_registers(const uint8_t *config, size_t size);
+    void reset();
+    void write_register(uint8_t reg, uint8_t value);
+    uint8_t read_register(uint8_t reg);
+    void write_burst_register(uint8_t reg, const uint8_t *buffer, size_t len);
+    void send_strobe(uint8_t strobe);
+    void flush_rx();
+    void flush_tx();
+    void configure_868mhz();
     
-    GPIOPin *pwr_pin_{nullptr};
-    GPIOPin *ce_pin_{nullptr};
-    GPIOPin *txen_pin_{nullptr};
-    GPIOPin *dr_pin_{nullptr};
+    GPIOPin *gdo0_pin_{nullptr};
+    GPIOPin *gdo2_pin_{nullptr};
 };
 
 
@@ -129,7 +157,7 @@ struct PendingOperation {
 
 class ZehnderFanProtocol {
 public:
-    ZehnderFanProtocol(NRF905Controller *radio);
+    ZehnderFanProtocol(CC1101Controller *radio);
 
     // Async interface - returns immediately
     void start_pairing();
@@ -160,7 +188,7 @@ private:
     void setup_pairing_ack();
     void handle_pairing_response();
     
-    NRF905Controller *radio_;
+    CC1101Controller *radio_;
     uint8_t rx_buffer_[FAN_FRAMESIZE]{0};
     PendingOperation pending_op_{};
     bool last_operation_success_{false};
@@ -192,10 +220,8 @@ public:
     void start_pairing();
 
     // Pin Setters from YAML
-    void set_pwr_pin(GPIOPin *pin) { this->pwr_pin_ = pin; }
-    void set_ce_pin(GPIOPin *pin) { this->ce_pin_ = pin; }
-    void set_txen_pin(GPIOPin *pin) { this->txen_pin_ = pin; }
-    void set_dr_pin(GPIOPin *pin) { this->dr_pin_ = pin; }
+    void set_gdo0_pin(GPIOPin *pin) { this->gdo0_pin_ = pin; }
+    void set_gdo2_pin(GPIOPin *pin) { this->gdo2_pin_ = pin; }
     void set_cs_pin(GPIOPin *pin) { this->cs_pin_ = pin; }
     void set_spi_parent(spi::SPIComponent *parent) { this->spi_parent_ = parent; }
 
@@ -206,14 +232,12 @@ protected:
     
     void handle_operation_complete();
 
-    NRF905Controller nrf_radio_;
+    CC1101Controller cc1101_radio_;
     std::unique_ptr<ZehnderFanProtocol> fan_protocol_;
     
     // Pins from YAML
-    GPIOPin *pwr_pin_;
-    GPIOPin *ce_pin_;
-    GPIOPin *txen_pin_;
-    GPIOPin *dr_pin_;
+    GPIOPin *gdo0_pin_;
+    GPIOPin *gdo2_pin_;
     GPIOPin *cs_pin_;
     spi::SPIComponent *spi_parent_;
 
