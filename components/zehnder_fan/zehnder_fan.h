@@ -40,6 +40,9 @@ static const uint8_t CC1101_RXFIFO = 0x3F;
 static const uint8_t CC1101_RXBYTES = 0x3B;
 static const uint8_t CC1101_MARCSTATE = 0x35;
 
+// CC1101 Configuration Registers
+static const uint8_t CC1101_IOCFG2 = 0x00;  // Configuration register start address
+
 // Fan device types and commands
 enum {
     FAN_TYPE_BROADCAST = 0x00,
@@ -105,6 +108,7 @@ private:
     void flush_rx();
     void flush_tx();
     void configure_868mhz();
+    void set_address(uint32_t address);  // Helper for setting address register
     
     GPIOPin *gdo0_pin_{nullptr};
     GPIOPin *gdo2_pin_{nullptr};

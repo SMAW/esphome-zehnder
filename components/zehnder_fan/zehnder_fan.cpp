@@ -139,8 +139,8 @@ void CC1101Controller::flush_tx() {
 }
 
 void CC1101Controller::configure_868mhz() {
-    // Write all configuration registers in burst mode
-    this->write_burst_register(0x00, cc1101_config_regs, sizeof(cc1101_config_regs));
+    // Write all configuration registers in burst mode starting at IOCFG2 (0x00)
+    this->write_burst_register(CC1101_IOCFG2, cc1101_config_regs, sizeof(cc1101_config_regs));
     
     // Set packet length to 16 bytes (Zehnder frame size)
     this->write_register(0x06, FAN_FRAMESIZE);
@@ -161,15 +161,21 @@ void CC1101Controller::set_mode_transmit() {
     delayMicroseconds(100);
 }
 
-void CC1101Controller::set_tx_address(uint32_t address) {
-    // For CC1101, we'll use the sync word mechanism
-    // Store address in ADDR register for filtering
+void CC1101Controller::set_address(uint32_t address) {
+    // CC1101 uses a single byte address for filtering (ADDR register at 0x09)
+    // The Zehnder protocol may use the full 32-bit address in the payload itself,
+    // but for hardware filtering we use the lowest byte
     this->write_register(0x09, (address >> 0) & 0xFF);
 }
 
+void CC1101Controller::set_tx_address(uint32_t address) {
+    // For CC1101, TX and RX use the same address register
+    this->set_address(address);
+}
+
 void CC1101Controller::set_rx_address(uint32_t address) {
-    // For CC1101, configure address filtering
-    this->write_register(0x09, (address >> 0) & 0xFF);
+    // For CC1101, TX and RX use the same address register
+    this->set_address(address);
 }
 
 void CC1101Controller::write_tx_payload(const uint8_t *payload, size_t size) {
@@ -191,8 +197,12 @@ bool CC1101Controller::read_rx_payload(uint8_t *buffer, size_t size) {
         return false;
     }
     
-    // Check how many bytes are in RX FIFO
-    uint8_t rxbytes = this->read_register(CC1101_RXBYTES | CC1101_READ_BURST);
+    // Read RXBYTES status register (status registers need special access)
+    this->enable();
+    this->write_byte(CC1101_RXBYTES | CC1101_READ_BURST);
+    uint8_t rxbytes = this->read_byte();
+    this->disable();
+    
     uint8_t num_rxbytes = rxbytes & 0x7F;
     
     if (num_rxbytes < size) {
